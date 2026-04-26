@@ -1,5 +1,6 @@
 import os
 import json
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 import anthropic
@@ -8,6 +9,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     ConversationHandler, filters, ContextTypes
 )
+from agents import run_agents
 
 load_dotenv()
 
@@ -17,7 +19,9 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 PROFILES_DIR = Path("profiles")
+DOCS_DIR = Path("documents")
 PROFILES_DIR.mkdir(exist_ok=True)
+DOCS_DIR.mkdir(exist_ok=True)
 
 OWNER_ID = 535542320
 
@@ -30,28 +34,11 @@ QUESTIONS = [
     ("goal",          "Какая главная цель на ближайший год?"),
     ("strengths",     "Что тебе легче всего даётся в работе?"),
     ("challenges",    "Что для тебя самое сложное в бизнесе?"),
-    ("adhd",          "Есть ли у тебя СДВГ или другие нейроотличия? Как это влияет на твою работу?"),
+    ("adhd",          "Есть ли у тебя СДВГ или другие нейроотличия? Как это влияет на работу?"),
     ("education",     "Какое у тебя образование или специализация?"),
     ("budget",        "Какой бюджет готова вложить в новый проект?"),
     ("ai_motivation", "Почему хочешь работать в AI для бизнеса? Что тебя туда тянет?"),
 ]
-
-SYSTEM_PROMPT = """Ты — Бизнес-ментор по имени Максим. 30 лет предпринимательского опыта в разных сферах.
-Ты сам живёшь с СДВГ и выстроил несколько успешных бизнесов — умеешь видеть возможности там, где другие видят хаос.
-Имеешь глубокие знания в бизнес-психологии и AI-технологиях.
-
-Твой стиль:
-- Прямой и честный, без воды и мотивационных клише
-- Даёшь конкретные шаги, не абстрактные советы
-- Понимаешь СДВГ изнутри — не осуждаешь, а находишь рабочие обходные пути
-- Иногда жёсткий, но всегда поддерживающий
-- Умеешь задавать острые вопросы, которые заставляют думать
-- Говоришь только на русском языке
-
-Профиль твоего подопечного:
-{profile}
-
-Твоя задача: помочь найти нишу в AI для бизнеса, оценить идеи и выстроить стратегию — с учётом личных особенностей, ресурсов и нейроотличий подопечного."""
 
 
 def load_profile(user_id: int) -> dict:
@@ -83,16 +70,78 @@ def format_profile(profile: dict) -> str:
     return "\n".join(lines) if lines else "Профиль не заполнен."
 
 
+def read_docx(path: str) -> str:
+    from docx import Document
+    doc = Document(path)
+    return "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        return
+
+    doc = update.message.document
+    file_name = doc.file_name or "document"
+    ext = Path(file_name).suffix.lower()
+
+    if ext not in [".docx", ".txt"]:
+        await update.message.reply_text(f"Формат {ext} не поддерживается. Пришли .docx или .txt")
+        return
+
+    await update.message.reply_text(f"Читаю «{file_name}»...")
+
+    tg_file = await doc.get_file()
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp_path = tmp.name
+
+    await tg_file.download_to_drive(tmp_path)
+
+    try:
+        if ext == ".docx":
+            text = read_docx(tmp_path)
+        else:
+            text = Path(tmp_path).read_text(encoding="utf-8", errors="ignore")
+
+        text = text[:50000]
+        save_path = DOCS_DIR / f"{Path(file_name).stem}.txt"
+        save_path.write_text(text, encoding="utf-8")
+
+        response = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=512,
+            system="Отвечай только на русском языке.",
+            messages=[{"role": "user", "content": f"Кратко (5 предложений) — о чём этот документ?\n\n{text[:8000]}"}]
+        )
+        summary = response.content[0].text
+
+        await update.message.reply_text(
+            f"Документ «{file_name}» сохранён.\n\n*Краткое содержание:*\n{summary}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при чтении: {str(e)}")
+    finally:
+        os.unlink(tmp_path)
+
+    return CHATTING
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
         await update.message.reply_text("Этот бот личный и недоступен для посторонних.")
         return ConversationHandler.END
+
     profile = load_profile(user_id)
 
     if profile.get("onboarding_done"):
         await update.message.reply_text(
-            f"С возвращением, {profile.get('name', 'друг')}! Я помню тебя.\n\nЧем могу помочь?"
+            f"С возвращением, {profile.get('name', 'друг')}!\n\n"
+            "Система агентов готова. Можешь:\n"
+            "— Задать вопрос про рынок, нишу или стратегию\n"
+            "— Прислать документ (.docx или .txt) для изучения\n"
+            "— Попросить написать текст, пост или письмо"
         )
         return CHATTING
 
@@ -100,9 +149,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["question_index"] = 0
 
     await update.message.reply_text(
-        "Привет! Я Максим — твой бизнес-ментор.\n\n"
-        "30 лет в предпринимательстве. Сам с СДВГ. Знаю бизнес изнутри — и нейроотличия тоже.\n\n"
-        "Прежде чем давать советы — хочу тебя узнать. Отвечай честно, это только между нами.\n\n"
+        "Привет! Я Максим — твой бизнес-ментор и система AI-агентов.\n\n"
+        "Умею искать информацию в интернете, анализировать рынки, читать документы и писать тексты.\n\n"
+        "Сначала познакомимся. Отвечай честно.\n\n"
         f"*{QUESTIONS[0][1]}*",
         parse_mode="Markdown"
     )
@@ -121,19 +170,16 @@ async def onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["question_index"] = next_idx
 
     if next_idx < len(QUESTIONS):
-        await update.message.reply_text(
-            f"*{QUESTIONS[next_idx][1]}*",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"*{QUESTIONS[next_idx][1]}*", parse_mode="Markdown")
         return ONBOARDING
 
     profile["onboarding_done"] = True
     save_profile(update.effective_user.id, profile)
 
     await update.message.reply_text(
-        f"Отлично, {profile.get('name', '')}. Теперь я знаю достаточно.\n\n"
-        "Давай работать. Задай свой первый вопрос — например:\n"
-        "_«Стоит ли мне создавать AI-агента для владельцев бизнеса?»_",
+        f"Отлично, {profile.get('name', '')}. Теперь я знаю тебя.\n\n"
+        "Система агентов активирована. Задай первый вопрос!\n"
+        "_Например: «Проанализируй рынок AI-инструментов для малого бизнеса в России»_",
         parse_mode="Markdown"
     )
     return CHATTING
@@ -142,28 +188,29 @@ async def onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     profile = load_profile(user_id)
-
     history = context.user_data.get("history", [])
-    history.append({"role": "user", "content": update.message.text})
-    if len(history) > 20:
-        history = history[-20:]
-
-    system = SYSTEM_PROMPT.format(profile=format_profile(profile))
 
     await update.message.chat.send_action("typing")
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        system=system,
-        messages=history,
+    reply = await run_agents(
+        user_message=update.message.text,
+        profile=format_profile(profile),
+        history=history
     )
 
-    reply = response.content[0].text
+    history.append({"role": "user", "content": update.message.text})
     history.append({"role": "assistant", "content": reply})
+    if len(history) > 20:
+        history = history[-20:]
     context.user_data["history"] = history
 
-    await update.message.reply_text(reply)
+    # Telegram лимит 4096 символов — делим длинные ответы
+    if len(reply) <= 4096:
+        await update.message.reply_text(reply)
+    else:
+        for i in range(0, len(reply), 4096):
+            await update.message.reply_text(reply[i:i+4096])
+
     return CHATTING
 
 
@@ -186,13 +233,16 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             ONBOARDING: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding)],
-            CHATTING:   [MessageHandler(filters.TEXT & ~filters.COMMAND, chat)],
+            CHATTING: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, chat),
+                MessageHandler(filters.Document.ALL, handle_document),
+            ],
         },
         fallbacks=[CommandHandler("reset", reset)],
     )
 
     app.add_handler(conv)
-    print("Бот запущен...")
+    print("Бот с агентами запущен...")
     app.run_polling()
 
 
