@@ -1,13 +1,22 @@
 import os
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 import anthropic
-from tavily import TavilyClient
 
 load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+
+def tavily_search(query: str, search_depth: str = "basic", max_results: int = 5) -> dict:
+    response = requests.post(
+        "https://api.tavily.com/search",
+        json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": search_depth, "max_results": max_results},
+        timeout=15
+    )
+    return response.json() if response.ok else {"results": []}
 
 DOCS_DIR = Path("documents")
 DOCS_DIR.mkdir(exist_ok=True)
@@ -78,7 +87,7 @@ def execute_tool(name: str, inputs: dict) -> str:
     try:
         if name == "search_web":
             depth = inputs.get("depth", "basic")
-            results = tavily.search(query=inputs["query"], search_depth=depth, max_results=5)
+            results = tavily_search(query=inputs["query"], search_depth=depth, max_results=5)
             items = []
             for r in results.get("results", []):
                 items.append(f"**{r.get('title', '')}**\n{r.get('content', '')[:600]}\nИсточник: {r.get('url', '')}")
@@ -93,7 +102,7 @@ def execute_tool(name: str, inputs: dict) -> str:
             ]
             all_results = []
             for q in queries:
-                r = tavily.search(query=q, search_depth="advanced", max_results=3)
+                r = tavily_search(query=q, search_depth="advanced", max_results=3)
                 for item in r.get("results", []):
                     all_results.append(f"{item.get('title', '')}: {item.get('content', '')[:400]}")
             return "\n\n".join(all_results) or "Данных не найдено."
@@ -106,7 +115,7 @@ def execute_tool(name: str, inputs: dict) -> str:
             ]
             all_results = []
             for q in queries:
-                r = tavily.search(query=q, search_depth="basic", max_results=2)
+                r = tavily_search(query=q, search_depth="basic", max_results=2)
                 for item in r.get("results", []):
                     all_results.append(item.get("content", "")[:400])
             return "\n\n".join(all_results) or "Данных не найдено."
