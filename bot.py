@@ -19,6 +19,8 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 PROFILES_DIR = Path("profiles")
 PROFILES_DIR.mkdir(exist_ok=True)
 
+OWNER_ID = 535542320
+
 ONBOARDING, CHATTING = range(2)
 
 QUESTIONS = [
@@ -83,6 +85,9 @@ def format_profile(profile: dict) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("Этот бот личный и недоступен для посторонних.")
+        return ConversationHandler.END
     profile = load_profile(user_id)
 
     if profile.get("onboarding_done"):
