@@ -172,6 +172,9 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     conv = ConversationHandler(
